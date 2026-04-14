@@ -122,37 +122,56 @@ _issues_state_file() {
   echo "${STATE_DIR}/issues-${project}.ids"
 }
 
-set_active_issues() {
-  # Writes issue IDs to the session state file and marks them In Progress.
-  # Args: $@ = one or more issue IDs (integers)
+set_active_issue() {
+  # Writes exactly one issue ID to the session state file and marks it In Progress.
+  # Args: $1 = single issue ID (integer). Rejects more than one argument.
+  if [[ $# -ne 1 ]]; then
+    echo "ERROR: set_active_issue accepts exactly one issue ID. Received $# arguments." \
+         "Use a single issue per session to avoid ambiguous commit linkage." >&2
+    return 1
+  fi
+
+  local id="$1"
+  if [[ ! "$id" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: set_active_issue — argument must be a positive integer, got: ${id}" >&2
+    return 1
+  fi
+
   local project_dir="${CLAUDE_PROJECT_DIR:-.}"
   local state_file
   state_file=$(_issues_state_file "$project_dir")
   local cycle_id
   cycle_id=$(get_current_cycle_id "$project_dir")
 
-  # Clear and rewrite the state file
-  : > "$state_file"
+  # Validate issue exists in DB
+  local exists
+  exists=$(_db "SELECT id FROM issues WHERE id=${id};")
+  if [[ -z "$exists" ]]; then
+    echo "ERROR: set_active_issue — issue #${id} not found in product DB." >&2
+    return 1
+  fi
 
-  for id in "$@"; do
-    [[ "$id" =~ ^[0-9]+$ ]] || continue
-    # Validate issue exists
-    local exists
-    exists=$(_db "SELECT id FROM issues WHERE id=${id};")
-    [[ -z "$exists" ]] && continue
+  # Write exactly one line to the state file (overwrites any prior plural state)
+  echo "$id" > "$state_file"
 
-    echo "$id" >> "$state_file"
+  # Mark In Progress
+  _db "UPDATE issues SET status='In Progress'
+       WHERE id=${id} AND status NOT IN ('Done');"
 
-    # Mark In Progress
-    _db "UPDATE issues SET status='In Progress'
-         WHERE id=${id} AND status NOT IN ('Done');"
+  # Link to current cycle
+  if [[ -n "$cycle_id" ]]; then
+    _db "INSERT OR IGNORE INTO cycle_issues (cycle_id, issue_id)
+         VALUES (${cycle_id}, ${id});"
+  fi
+}
 
-    # Link to current cycle
-    if [[ -n "$cycle_id" ]]; then
-      _db "INSERT OR IGNORE INTO cycle_issues (cycle_id, issue_id)
-           VALUES (${cycle_id}, ${id});"
-    fi
-  done
+# DEPRECATED shim — set_active_issues (plural) is no longer valid.
+# This shim exists for one cycle only to surface loud errors rather than
+# silently activating the first ID. Remove after the next session cycle.
+set_active_issues() {
+  echo "DEPRECATED: set_active_issues is replaced by set_active_issue (singular)." \
+       "A session must have exactly one active issue. Call: set_active_issue <id>" >&2
+  return 1
 }
 
 get_active_issue_ids() {
@@ -183,7 +202,7 @@ create_and_activate_issue() {
   new_id=$(_db "SELECT id FROM issues ORDER BY id DESC LIMIT 1;")
 
   if [[ -n "$new_id" ]]; then
-    set_active_issues "$new_id"
+    set_active_issue "$new_id"
     echo "$new_id"
   fi
 }
@@ -237,9 +256,11 @@ record_commit() {
   if [[ -z "$issue_id" ]]; then
     local active_ids
     active_ids=$(get_active_issue_ids "$project_dir")
+    # State file now holds exactly one ID (enforced by set_active_issue).
+    # Use it directly without awk fallback — multiple IDs indicate a corrupted
+    # state file and should surface as a missing link, not a silent first-pick.
     if [[ -n "$active_ids" ]]; then
-      # Use the first active issue as the primary link
-      issue_id=$(echo "$active_ids" | awk '{print $1}')
+      issue_id="$active_ids"
     fi
   fi
 

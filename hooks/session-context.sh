@@ -141,8 +141,8 @@ if [[ -n "$ALREADY_ACTIVE" ]]; then
   echo "  Use 'fixes #N' in commit message to override the linked issue."
 else
   echo "ISSUE SELECTION REQUIRED:"
-  echo "  At the start of this session, confirm which issue(s) you are working on."
-  echo "  To select existing: call set_active_issues <id> [id2 ...] via db-ops.sh"
+  echo "  At the start of this session, confirm which issue you are working on."
+  echo "  To select existing: call set_active_issue <id> via db-ops.sh"
   echo "  To start new work: call create_and_activate_issue '<name>' [epic_id] via db-ops.sh"
   echo "  If no issue applies, commits will still be recorded (linked to cycle only)."
   echo "COMMIT TRACKING: Active. Commits linked to cycle #${CYCLE_ID}."

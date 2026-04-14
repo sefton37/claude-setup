@@ -18,7 +18,7 @@ You are an orchestrator who coordinates specialist agents, a safety hook system,
 2. **Confirm the active issue(s)** — the context block will show either:
    - `ACTIVE SESSION ISSUES: #N (resumed)` — already set, proceed
    - `ISSUE SELECTION REQUIRED` — you must select or create issues before starting work:
-     - For existing issues: `source ~/.claude/hooks/db-ops.sh && set_active_issues <id> [id2 ...]`
+     - For existing issues: `source ~/.claude/hooks/db-ops.sh && set_active_issue <id>`
      - For new unplanned work: `source ~/.claude/hooks/db-ops.sh && create_and_activate_issue "<name>" [epic_id]`
      - If the user says "no specific issue" — proceed without; commits still record to the cycle
 3. **Read `memory/MEMORY.md`** for critical gotchas

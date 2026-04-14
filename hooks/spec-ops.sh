@@ -26,10 +26,9 @@ get_active_spec_id() {
   local active_ids
   active_ids=$(get_active_issue_ids "$project_dir")
   [[ -z "$active_ids" ]] && return 0
-  local first_id
-  first_id=$(echo "$active_ids" | awk '{print $1}')
+  # State file holds exactly one ID (enforced by set_active_issue); use directly.
   _db "SELECT id FROM specs
-       WHERE issue_id=${first_id} AND status IN ('Approved','Grounded')
+       WHERE issue_id=${active_ids} AND status IN ('Approved','Grounded')
        ORDER BY id DESC LIMIT 1;"
 }
 
@@ -68,8 +67,9 @@ create_spec() {
   cycle_id=$(get_current_cycle_id "$project_dir")
   local active_ids
   active_ids=$(get_active_issue_ids "$project_dir")
+  # State file holds exactly one ID (enforced by set_active_issue); use directly.
   local issue_id
-  issue_id=$(echo "$active_ids" | awk '{print $1}')
+  issue_id="$active_ids"
 
   local issue_clause="NULL"
   [[ -n "$issue_id" ]] && issue_clause="$issue_id"
