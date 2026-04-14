@@ -293,3 +293,19 @@ Services at `~/devops/`, Docker Compose on `devops-net`, Tailscale-only:
 - Ollama for all LLM inference (no cloud LLMs)
 - Textual TUI for developer tools
 - systemd for services, nginx reverse proxy
+
+---
+
+## --no-verify Prohibition
+
+**`git commit --no-verify` is forbidden for all Claude-authored commits.**
+
+Rationale: the local pre-commit and commit-msg hooks are the first two layers of the spec + issue-link enforcement chain. `--no-verify` bypasses both, leaving only the server-side Forgejo pre-receive hook and Woodpecker CI gate as defense. While those layers exist precisely because `--no-verify` is possible, bypassing local hooks increases the blast radius of a misconfigured or temporarily unreachable server-side gate.
+
+Rules:
+- Claude Code must not generate or suggest `git commit --no-verify` for any commit.
+- If a local hook is blocking a legitimate commit, the correct fix is to diagnose and resolve the hook issue — not bypass it.
+- The only permitted exception is a direct, explicit user instruction. Even then, Claude must warn that the server-side gate is now the sole enforcement layer.
+- This prohibition applies regardless of whether the commit is to main, a feature branch, or a temporary branch.
+
+The three-gate chain (local hooks → Forgejo pre-receive → Woodpecker CI) is only as strong as its weakest layer. Do not voluntarily weaken it.
