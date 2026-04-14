@@ -28,3 +28,4 @@ ide/
 # Hook runtime
 hooks/logs/
 hooks/state/
+hooks/pending-commits.log

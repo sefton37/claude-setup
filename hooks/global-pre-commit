@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+# ============================================================================
+# Global git pre-commit hook — Sensitive Pattern Scanner + Issue Linkage Check
+# ============================================================================
+# Runs two independent checks before every commit:
+#
+#   1. Issue linkage check (runs first, always): every commit must be linked
+#      to a product DB issue via fixes/closes/refs #N in the message OR an
+#      active session issue in the state file.
+#
+#   2. Sensitive content scan: scans staged additions against patterns in
+#      ~/.claude/hooks/sensitive-patterns.conf and CONTENT_GUARD_PATTERNS.
+#
+# This is the LAST deterministic barrier before secrets enter git history.
+# It runs at the git level — independent of Claude Code, hooks, or agents.
+# It catches secrets from ANY source: Claude, manual edits, scripts, etc.
+#
+# To bypass for a single commit (use with extreme caution):
+#   git commit --no-verify
+#
+# Post-incident hardening: VPS IP and username leaked into git history.
+#
+# CHAINING: Because core.hooksPath overrides per-repo hooks, this script
+# runs any per-repo pre-commit hook AFTER both checks pass.
+# This preserves husky, pre-commit framework, lint-staged, etc.
+# ============================================================================
+set -euo pipefail
+
+# ============================================================================
+# Issue linkage check MOVED TO commit-msg hook
+# ============================================================================
+# git writes COMMIT_EDITMSG AFTER pre-commit runs, so message-based checks
+# (fixes|closes|refs #N) cannot work here. See ~/.config/git/hooks/commit-msg.
+# ============================================================================
+# Sensitive content scan
+# ============================================================================
+PATTERNS_FILE="$HOME/.claude/hooks/sensitive-patterns.conf"
+
+# Load patterns from config file (generic pattern shapes)
+patterns=()
+if [[ -f "$PATTERNS_FILE" ]]; then
+  mapfile -t patterns < <(grep -vE '^\s*(#|$)' "$PATTERNS_FILE" 2>/dev/null || true)
+fi
+
+# Load from environment variable (infrastructure-specific values)
+# Set CONTENT_GUARD_PATTERNS in .bashrc as pipe-delimited regexes:
+#   export CONTENT_GUARD_PATTERNS='your\.ip\.here|\byour_username\b'
+if [[ -n "${CONTENT_GUARD_PATTERNS:-}" ]]; then
+  IFS='|' read -ra env_patterns <<< "$CONTENT_GUARD_PATTERNS"
+  patterns+=("${env_patterns[@]}")
+fi
+
+# No active patterns — pass through
+(( ${#patterns[@]} > 0 )) || exit 0
+
+# Get only the added lines from the staged diff
+# +++ headers excluded, only actual content additions
+staged_diff=$(git diff --cached --unified=0 -- ':!package-lock.json' ':!yarn.lock' ':!pnpm-lock.yaml' ':!Cargo.lock' ':!go.sum' ':!**/app/schemas/**/*.json' ':!app/schemas/**/*.json' ':!**/sensitive-patterns.conf' ':!**/content-guard.sh' ':!**/push-commit.sh' 2>/dev/null || true)
+added_lines=$(echo "$staged_diff" | grep -E '^\+[^+]' | sed 's/^\+//' || true)
+
+# Strip lines that are clearly Java/Kotlin/XML file path references
+# (e.g. in docs: `app/src/main/java/com/example/Foo.kt`). These paths are
+# composed of [A-Za-z0-9/] and can exceed 64 chars, triggering the base64
+# pattern. They are never secrets. Matches lines containing path segments
+# of the form: word/src/ or word/main/ or word/java/ etc.
+added_lines=$(echo "$added_lines" | grep -vP '(?:src|main|test|java|kotlin|res|assets)/\S{10,}' || true)
+
+# Nothing staged — pass through
+[[ -n "$added_lines" ]] || exit 0
+
+# Scan against each pattern
+matched=()
+
+for pattern in "${patterns[@]}"; do
+  trimmed=$(echo "$pattern" | sed 's/^\s*//;s/\s*$//')
+  [[ -n "$trimmed" ]] || continue
+
+  if echo "$added_lines" | grep -qiP "$trimmed" 2>/dev/null; then
+    # Get a preview of what matched
+    preview=$(echo "$added_lines" | grep -oiP "$trimmed" 2>/dev/null | head -1)
+    matched+=("$trimmed  (matched: ${preview:0:60})")
+  fi
+done
+
+if (( ${#matched[@]} > 0 )); then
+  echo ""
+  echo "=========================================="
+  echo " COMMIT BLOCKED — Sensitive Content Found"
+  echo "=========================================="
+  echo ""
+  echo "Pattern(s) matched in staged changes:"
+  printf '  * %s\n' "${matched[@]}"
+  echo ""
+  echo "Patterns defined in: $PATTERNS_FILE"
+  echo ""
+  echo "Actions:"
+  echo "  1. Remove the sensitive values from your files"
+  echo "  2. Use environment variables or .gitignored config files"
+  echo "  3. If false positive, adjust patterns in sensitive-patterns.conf"
+  echo "  4. To bypass ONCE: git commit --no-verify (use with caution)"
+  echo ""
+  exit 1
+fi
+
+# ============================================================================
+# Chain to per-repo pre-commit hook (if it exists)
+# ============================================================================
+# core.hooksPath overrides .git/hooks/, so we must explicitly run per-repo
+# hooks to preserve husky, lint-staged, pre-commit framework, etc.
+repo_root=$(git rev-parse --show-toplevel 2>/dev/null || true)
+if [[ -n "$repo_root" ]]; then
+  repo_hook="$repo_root/.git/hooks/pre-commit"
+  if [[ -x "$repo_hook" ]]; then
+    exec "$repo_hook" "$@"
+  fi
+  # Also check for husky (common location)
+  husky_hook="$repo_root/.husky/pre-commit"
+  if [[ -x "$husky_hook" ]]; then
+    exec "$husky_hook" "$@"
+  fi
+fi
+
+exit 0

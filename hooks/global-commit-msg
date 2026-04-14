@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# ============================================================================
+# Global git commit-msg hook — Issue Linkage Check
+# ============================================================================
+# Every commit must reference an issue via either:
+#   (a) explicit keyword in message: fixes #N, closes #N, refs #N
+#   (b) active session state file for the repo's project
+#
+# SKIPPED when no ~/.claude/hooks/state/ directory exists (non-Claude hosts).
+# This hook runs at the git level for every commit from any source
+# (Claude Code, terminal, IDE, subprocess, except --no-verify).
+# ============================================================================
+set -euo pipefail
+
+STATE_DIR="$HOME/.claude/hooks/state"
+[[ -d "$STATE_DIR" ]] || exit 0
+
+COMMIT_MSG_FILE="${1:-}"
+[[ -n "$COMMIT_MSG_FILE" && -f "$COMMIT_MSG_FILE" ]] || exit 0
+
+commit_msg=$(cat "$COMMIT_MSG_FILE")
+
+# Strip git comment lines (lines starting with #) before scanning
+commit_msg_clean=$(echo "$commit_msg" | grep -v '^#' || true)
+
+has_explicit_ref=0
+if echo "$commit_msg_clean" | grep -qiE '(fixes|closes|refs)[[:space:]]+#[0-9]+'; then
+  has_explicit_ref=1
+fi
+
+has_active_issue=0
+repo_root=$(git rev-parse --show-toplevel 2>/dev/null || true)
+if [[ -n "$repo_root" ]]; then
+  project=$(basename "$repo_root")
+  issues_file="${STATE_DIR}/issues-${project}.ids"
+  if [[ -f "$issues_file" ]] && grep -qE '^[0-9]+$' "$issues_file" 2>/dev/null; then
+    has_active_issue=1
+  fi
+fi
+
+if [[ "$has_explicit_ref" -eq 0 && "$has_active_issue" -eq 0 ]]; then
+  echo ""
+  echo "=========================================="
+  echo " COMMIT BLOCKED — No issue linked"
+  echo "=========================================="
+  echo ""
+  echo "Every commit must be linked to a product DB issue."
+  echo "Either:"
+  echo "  1. Include 'fixes #N', 'closes #N', or 'refs #N' in your message"
+  echo "  2. Have an active session issue set via:"
+  echo "     source ~/.claude/hooks/db-ops.sh && set_active_issue <id>"
+  echo ""
+  echo "This keeps the product DB a faithful ledger of every line written."
+  echo ""
+  exit 1
+fi
+
+exit 0

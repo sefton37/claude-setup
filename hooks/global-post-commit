@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# ============================================================================
+# Global git post-commit hook — Product DB commit recorder
+# ============================================================================
+# Records every git commit to the product management database in real-time.
+# Installed at ~/.config/git/hooks/post-commit (core.hooksPath location),
+# so it fires for ALL repos instead of only repos with a per-repo symlink.
+#
+# Background: git config --global core.hooksPath = ~/.config/git/hooks
+# overrides all per-repo .git/hooks/ directories. The 18 per-repo symlinks
+# pointing to ~/.local/share/claude-db-hooks/post-commit.sh are superseded
+# by this global hook and never fire. They are left in place as a safety net:
+# if core.hooksPath is ever unset, the per-repo symlinks provide fallback
+# coverage. ComfyUI and Flint had no per-repo symlink; they are covered here
+# just like all other repos.
+#
+# Forgejo web-UI commits and Woodpecker CI commits cannot be captured by
+# this hook (they run server-side). See spec-3.md Appendix B for the deferred
+# sub-issues (server-side post-receive hook for Forgejo; REST endpoint for CI).
+#
+# This hook is FAIL-SAFE: non-zero exit from record_commit does NOT block
+# or interrupt the commit. post-commit hooks cannot block commits anyway,
+# but we also avoid bare set -e so that missing DB or missing db-ops.sh
+# is handled gracefully.
+#
+# CHAINING: Because core.hooksPath overrides per-repo hooks, this script
+# runs any per-repo post-commit hook AFTER the DB recording step.
+# This preserves repo-local post-commit behaviour (notifications, etc.).
+# ============================================================================
+
+DB_OPS="$HOME/.claude/hooks/db-ops.sh"
+
+if [[ ! -f "$DB_OPS" ]]; then
+  # db-ops.sh not found — skip recording, do not error
+  exit 0
+fi
+
+# Derive project directory from git; bail gracefully outside a git repo.
+PROJECT_DIR=$(git rev-parse --show-toplevel 2>/dev/null)
+if [[ -z "$PROJECT_DIR" ]]; then
+  exit 0
+fi
+
+# Export so db-ops.sh helpers can fall back to it without an explicit argument.
+export CLAUDE_PROJECT_DIR="$PROJECT_DIR"
+
+# Source db-ops.sh and record the commit.
+# shellcheck source=/home/kellogg/.claude/hooks/db-ops.sh
+source "$DB_OPS"
+
+# Attempt to record via db-ops.sh record_commit (handles active-issue linking).
+# record_commit returns 1 when no issue is resolvable (no active issue + no
+# fixes|closes|refs #N in message). In that case we CANNOT insert with NULL
+# issue_id — commits.issue_id is NOT NULL (spec #5 invariant). Instead we
+# append to ~/.claude/hooks/pending-commits.log for manual triage so the
+# commit is not silently dropped.
+PENDING_LOG="$HOME/.claude/hooks/pending-commits.log"
+
+if ! record_commit "$PROJECT_DIR" 2>/dev/null; then
+  _hash=$(git rev-parse HEAD 2>/dev/null)
+  _short=$(git rev-parse --short HEAD 2>/dev/null)
+  _msg=$(git log -1 --format='%s' 2>/dev/null)
+  _author=$(git log -1 --format='%ae' 2>/dev/null)
+  _ts=$(git log -1 --format='%ai' 2>/dev/null)
+  _branch=$(git branch --show-current 2>/dev/null || echo "detached")
+  _project=$(basename "$PROJECT_DIR")
+  if [[ -n "$_hash" ]]; then
+    mkdir -p "$(dirname "$PENDING_LOG")"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$_ts" "$_hash" "$_project" "$_branch" "$_author" "$_msg" \
+      >> "$PENDING_LOG"
+  fi
+fi
+
+# ============================================================================
+# Chain to per-repo post-commit hook (if it exists and is executable)
+# ============================================================================
+# core.hooksPath overrides .git/hooks/ so we must invoke per-repo hooks
+# explicitly to preserve any repo-local post-commit logic.
+repo_hook="$PROJECT_DIR/.git/hooks/post-commit"
+if [[ -x "$repo_hook" ]]; then
+  # Run in the same working directory git itself uses for hooks.
+  "$repo_hook" "$@"
+fi
+
+exit 0
