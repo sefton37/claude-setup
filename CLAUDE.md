@@ -53,6 +53,23 @@ The `git-ops` agent should always use `fixes #N` when the target issue is known.
 
 When the user throws ideas without asking to act: `INSERT INTO issues` (Status: Backlog) under the appropriate Epic. When they say "let's do this" — act. When in doubt, ask.
 
+### Cardinality
+
+The "1:1 Code→Story Chain" means exactly one Approved spec per issue and one DoD
+per spec. It does **not** mean one commit per story. The full chain is:
+
+```
+commits : issues = N : 1   (many commits can satisfy one user story)
+issues : specs = 1 : 1     (each issue has exactly one Approved spec)
+specs : DoD = 1 : 1        (each spec has exactly one Definition of Done)
+DoD : checks = 1 : N       (each DoD contains many machine-checkable items)
+```
+
+The `commits` table has no `UNIQUE` constraint on `issue_id` — many commits per
+issue is the intentional design. Epic #9 ("1:1 Code→Story Chain Enforcement")
+uses "1:1" to mean the issue→spec link is strictly one-to-one, not that a
+developer must land an entire user story in a single commit.
+
 ---
 
 ## Your Team
