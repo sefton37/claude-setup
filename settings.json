@@ -1,0 +1,143 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash /home/kellogg/.claude/hooks/session-checkpoint.sh",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash /home/kellogg/.claude/hooks/deletion-guard.sh",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "bash /home/kellogg/.claude/hooks/secrets-guard.sh",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "bash /home/kellogg/.claude/hooks/overwrite-guard.sh",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "bash /home/kellogg/.claude/hooks/network-guard.sh",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "bash /home/kellogg/.claude/hooks/package-guard.sh",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "bash /home/kellogg/.claude/hooks/scope-guard.sh",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash /home/kellogg/.claude/hooks/secrets-guard.sh",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash /home/kellogg/.claude/hooks/scope-guard.sh",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "bash /home/kellogg/.claude/hooks/content-guard.sh",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "bash /home/kellogg/.claude/hooks/contract-gate.sh",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Read|WebFetch|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash /home/kellogg/.claude/hooks/injection-scanner.sh",
+            "timeout": 15
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash /home/kellogg/.claude/hooks/edit-verify.sh",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash /home/kellogg/.claude/hooks/delegation-verify.sh",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash /home/kellogg/.claude/hooks/permission-handler.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash /home/kellogg/.claude/hooks/push-commit.sh",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  },
+  "enabledPlugins": {
+    "rust-analyzer-lsp@claude-plugins-official": true
+  },
+  "skipDangerousModePermissionPrompt": true
+}

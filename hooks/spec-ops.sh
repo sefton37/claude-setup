@@ -1,0 +1,302 @@
+#!/usr/bin/env bash
+# ============================================================================
+# spec-ops.sh — Shared SQLite operations for Spec-Driven Development
+# ============================================================================
+# Sourced by contract-gate.sh, drift-detector.sh, session-context.sh, and
+# invoked directly from the product-owner / reviewer / auditor agents.
+#
+# Implements Gate 0 of the verification chain: no code change proceeds
+# without an APPROVED spec whose DoD is machine-checkable.
+#
+# Usage: source ~/.claude/hooks/spec-ops.sh
+# ============================================================================
+
+source "$HOME/.claude/hooks/db-ops.sh"
+
+SPEC_DOCS_BASE="$HOME/talking-rock/product/docs"
+
+# ---- Query helpers ---------------------------------------------------------
+
+get_active_spec_id() {
+  # Returns the spec_id of the most recent Approved or Grounded spec for the
+  # active session issue(s). Empty string if none.
+  local project_dir="${1:-$CLAUDE_PROJECT_DIR}"
+  local active_ids
+  active_ids=$(get_active_issue_ids "$project_dir")
+  [[ -z "$active_ids" ]] && return 0
+  local first_id
+  first_id=$(echo "$active_ids" | awk '{print $1}')
+  _db "SELECT id FROM specs
+       WHERE issue_id=${first_id} AND status IN ('Approved','Grounded')
+       ORDER BY id DESC LIMIT 1;"
+}
+
+get_spec_status() {
+  local spec_id="$1"
+  [[ -z "$spec_id" ]] && return 0
+  _db "SELECT status FROM specs WHERE id=${spec_id};"
+}
+
+get_spec_field() {
+  # Args: $1=spec_id $2=column
+  local spec_id="$1" col="$2"
+  [[ -z "$spec_id" ]] && return 0
+  _db "SELECT ${col} FROM specs WHERE id=${spec_id};"
+}
+
+get_spec_doc_path() {
+  get_spec_field "$1" doc_path
+}
+
+get_spec_dod() {
+  # Returns raw JSON array of DoD checks
+  get_spec_field "$1" dod_json
+}
+
+# ---- Spec lifecycle --------------------------------------------------------
+
+create_spec() {
+  # Creates a Draft spec for the first active issue. Returns spec_id.
+  # Args: $1=original_prompt   $2=project_dir (optional)
+  local prompt="$1"
+  local project_dir="${2:-$CLAUDE_PROJECT_DIR}"
+  local project
+  project=$(get_project_name "$project_dir")
+  local cycle_id
+  cycle_id=$(get_current_cycle_id "$project_dir")
+  local active_ids
+  active_ids=$(get_active_issue_ids "$project_dir")
+  local issue_id
+  issue_id=$(echo "$active_ids" | awk '{print $1}')
+
+  local issue_clause="NULL"
+  [[ -n "$issue_id" ]] && issue_clause="$issue_id"
+  local cycle_clause="NULL"
+  [[ -n "$cycle_id" ]] && cycle_clause="$cycle_id"
+
+  local safe_prompt="${prompt//\'/\'\'}"
+
+  _db "INSERT INTO specs (issue_id, cycle_id, project, original_prompt, status)
+       VALUES (${issue_clause}, ${cycle_clause}, '${project}', '${safe_prompt}', 'Draft');"
+
+  _db "SELECT id FROM specs WHERE project='${project}' ORDER BY id DESC LIMIT 1;"
+}
+
+update_spec() {
+  # Args: $1=spec_id  $2=column  $3=value
+  local spec_id="$1" col="$2" val="$3"
+  local safe_val="${val//\'/\'\'}"
+  _db "UPDATE specs SET ${col}='${safe_val}' WHERE id=${spec_id};"
+}
+
+set_spec_status() {
+  # Args: $1=spec_id  $2=status
+  local spec_id="$1" status="$2"
+  local extra=""
+  if [[ "$status" == "Approved" ]]; then
+    extra=", approved_at=datetime('now'), approved_by='user'"
+  elif [[ "$status" == "Fulfilled" ]]; then
+    extra=", fulfilled_at=datetime('now')"
+  fi
+  _db "UPDATE specs SET status='${status}'${extra} WHERE id=${spec_id};"
+}
+
+# ---- Grounding -------------------------------------------------------------
+
+add_grounding() {
+  # Records one grounding row. Call once per referenced file/symbol/test.
+  # Args: $1=spec_id $2=kind(file|symbol|test|command_output)
+  #       $3=path $4=symbol $5=sha256 $6=snippet
+  local spec_id="$1" kind="$2" path="$3" symbol="$4" sha="$5" snippet="$6"
+  local safe_snippet="${snippet//\'/\'\'}"
+  _db "INSERT INTO spec_groundings (spec_id, kind, path, symbol, sha256, snippet)
+       VALUES (${spec_id}, '${kind}',
+               $( [[ -n "$path" ]] && echo "'${path}'" || echo "NULL" ),
+               $( [[ -n "$symbol" ]] && echo "'${symbol//\'/\'\'}'" || echo "NULL" ),
+               $( [[ -n "$sha" ]] && echo "'${sha}'" || echo "NULL" ),
+               '${safe_snippet}');"
+}
+
+ground_file() {
+  # Helper: hash a file and record it as grounding. Returns 1 if file missing.
+  # Args: $1=spec_id $2=path
+  local spec_id="$1" path="$2"
+  [[ ! -f "$path" ]] && return 1
+  local sha
+  sha=$(sha256sum "$path" | awk '{print $1}')
+  add_grounding "$spec_id" file "$path" "" "$sha" ""
+}
+
+ground_symbol() {
+  # Greps for a symbol in a file, records grounding with snippet.
+  # Returns 1 if symbol not found (spec must not reference nonexistent symbols).
+  # Args: $1=spec_id $2=path $3=symbol
+  local spec_id="$1" path="$2" symbol="$3"
+  local snippet
+  snippet=$(grep -n "$symbol" "$path" 2>/dev/null | head -3)
+  [[ -z "$snippet" ]] && return 1
+  local sha=""
+  [[ -f "$path" ]] && sha=$(sha256sum "$path" | awk '{print $1}')
+  add_grounding "$spec_id" symbol "$path" "$symbol" "$sha" "$snippet"
+}
+
+# ---- Check recording -------------------------------------------------------
+
+record_check() {
+  # Appends one check result. Returns check row id.
+  # Args: $1=spec_id $2=check_id $3=check_type $4=phase
+  #       $5=result(pass|fail|precondition-unmet|skipped)
+  #       $6=command $7=expected $8=actual $9=run_n
+  local spec_id="$1" cid="$2" ctype="$3" phase="$4"
+  local result="$5" cmd="$6" expected="$7" actual="$8"
+  local run_n="${9:-1}"
+  local safe_cmd="${cmd//\'/\'\'}"
+  local safe_expected="${expected//\'/\'\'}"
+  local safe_actual="${actual//\'/\'\'}"
+  _db "INSERT INTO spec_checks
+         (spec_id, check_id, check_type, phase, result, run_n, command, expected, actual)
+       VALUES (${spec_id}, '${cid}', '${ctype}', '${phase}',
+               '${result}', ${run_n}, '${safe_cmd}',
+               '${safe_expected}', '${safe_actual}');"
+}
+
+get_check_results() {
+  # Returns markdown table of check results for a spec, most recent run per check_id per phase.
+  # Args: $1=spec_id  $2=phase(optional filter)
+  local spec_id="$1" phase_filter="$2"
+  local phase_clause=""
+  [[ -n "$phase_filter" ]] && phase_clause="AND phase='${phase_filter}'"
+  _db "SELECT check_id, check_type, phase, result, run_n, substr(actual, 1, 80)
+       FROM spec_checks
+       WHERE spec_id=${spec_id} ${phase_clause}
+       ORDER BY run_at DESC;"
+}
+
+count_failing_checks() {
+  # Args: $1=spec_id  $2=phase(optional)
+  local spec_id="$1" phase_filter="$2"
+  local phase_clause=""
+  [[ -n "$phase_filter" ]] && phase_clause="AND phase='${phase_filter}'"
+  _db "SELECT COUNT(*) FROM spec_checks
+       WHERE spec_id=${spec_id} AND result='fail' ${phase_clause};"
+}
+
+# ---- DoD check execution ---------------------------------------------------
+# Given one DoD check object (as a JSON line from dod_json), run it and return
+# pass|fail|precondition-unmet plus the raw output. Callers wrap this with
+# record_check() to persist evidence.
+#
+# The DoD check object shape:
+#   { "id": "DOD-1",
+#     "type": "existence|absence|behavior|equality|count|coverage|no-fabrication|user-observable",
+#     "precondition": "shell command that must exit 0 for check to be valid (or empty)",
+#     "check":   "shell command to run",
+#     "expected": "expected stdout or numeric comparator like >=1 | ==0 | exit:0"
+#   }
+
+run_dod_check() {
+  # Args: $1=json_obj (single-line JSON)
+  # Echoes: "result|||actual_output"   (result is pass|fail|precondition-unmet|skipped)
+  local json="$1"
+  local check_type precondition check expected
+  check_type=$(echo "$json" | jq -r '.type // "behavior"')
+  precondition=$(echo "$json" | jq -r '.precondition // ""')
+  check=$(echo "$json" | jq -r '.check // ""')
+  expected=$(echo "$json" | jq -r '.expected // ""')
+
+  # User-observable checks cannot be auto-run
+  if [[ "$check_type" == "user-observable" ]]; then
+    echo "skipped|||requires human verification"
+    return 0
+  fi
+
+  # Precondition gate
+  if [[ -n "$precondition" ]]; then
+    if ! bash -c "$precondition" >/dev/null 2>&1; then
+      echo "precondition-unmet|||precondition: ${precondition}"
+      return 0
+    fi
+  fi
+
+  # Execute check
+  local actual exit_code
+  actual=$(bash -c "$check" 2>&1)
+  exit_code=$?
+
+  # Compare against expected — support several comparators
+  local result="fail"
+  if [[ -z "$expected" ]]; then
+    [[ $exit_code -eq 0 ]] && result="pass"
+  elif [[ "$expected" == "exit:0" ]]; then
+    [[ $exit_code -eq 0 ]] && result="pass"
+  elif [[ "$expected" == "exit:nonzero" ]]; then
+    [[ $exit_code -ne 0 ]] && result="pass"
+  elif [[ "$expected" =~ ^(>=|<=|==|>|<)([0-9]+)$ ]]; then
+    local op="${BASH_REMATCH[1]}"
+    local num="${BASH_REMATCH[2]}"
+    # Treat actual as an integer (first integer in output)
+    local actual_num
+    actual_num=$(echo "$actual" | grep -oE '[0-9]+' | head -1)
+    [[ -z "$actual_num" ]] && actual_num=0
+    case "$op" in
+      ">=") [[ $actual_num -ge $num ]] && result="pass" ;;
+      "<=") [[ $actual_num -le $num ]] && result="pass" ;;
+      "==") [[ $actual_num -eq $num ]] && result="pass" ;;
+      ">")  [[ $actual_num -gt $num ]] && result="pass" ;;
+      "<")  [[ $actual_num -lt $num ]] && result="pass" ;;
+    esac
+  else
+    # Literal string match
+    [[ "$actual" == *"$expected"* ]] && result="pass"
+  fi
+
+  # Truncate actual for storage
+  local trimmed
+  trimmed=$(echo "$actual" | head -c 4000)
+  echo "${result}|||${trimmed}"
+}
+
+run_all_dod_checks() {
+  # Runs every check in a spec's DoD and records results. Returns 0 if all
+  # pass, non-zero otherwise (number = count of failing/unmet).
+  # Args: $1=spec_id  $2=phase  $3=run_n (default 1)
+  local spec_id="$1" phase="$2" run_n="${3:-1}"
+  local dod
+  dod=$(get_spec_dod "$spec_id")
+  [[ -z "$dod" || "$dod" == "null" ]] && return 0
+
+  local failures=0
+  while IFS= read -r json_line; do
+    [[ -z "$json_line" ]] && continue
+    local cid ctype cmd expected
+    cid=$(echo "$json_line" | jq -r '.id // "unknown"')
+    ctype=$(echo "$json_line" | jq -r '.type // "behavior"')
+    cmd=$(echo "$json_line" | jq -r '.check // ""')
+    expected=$(echo "$json_line" | jq -r '.expected // ""')
+
+    local out result actual
+    out=$(run_dod_check "$json_line")
+    result="${out%%|||*}"
+    actual="${out#*|||}"
+
+    record_check "$spec_id" "$cid" "$ctype" "$phase" \
+                 "$result" "$cmd" "$expected" "$actual" "$run_n"
+
+    [[ "$result" != "pass" && "$result" != "skipped" ]] && ((failures++))
+  done < <(echo "$dod" | jq -c '.[]')
+
+  return $failures
+}
+
+# ---- Markdown doc helpers --------------------------------------------------
+
+spec_doc_path_for() {
+  # Args: $1=project $2=spec_id
+  local project="$1" spec_id="$2"
+  echo "${SPEC_DOCS_BASE}/${project}/specs/spec-${spec_id}.md"
+}
+
+ensure_spec_doc_dir() {
+  local project="$1"
+  mkdir -p "${SPEC_DOCS_BASE}/${project}/specs"
+}

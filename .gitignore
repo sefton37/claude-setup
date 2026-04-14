@@ -1,0 +1,30 @@
+# Session/runtime state — not tracked
+projects/
+sessions/
+session-env/
+history.jsonl
+todos/
+tasks/
+stats-cache.json
+mcp-needs-auth-cache.json
+
+# Caches & transient
+cache/
+paste-cache/
+file-history/
+shell-snapshots/
+backups/
+downloads/
+debug/
+telemetry/
+statsig/
+
+# Local-only settings and secrets
+settings.local.json
+approval-secret
+plugins/
+ide/
+
+# Hook runtime
+hooks/logs/
+hooks/state/
