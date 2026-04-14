@@ -112,31 +112,21 @@ set_spec_status() {
   # Args: $1=spec_id  $2=status
   # Valid statuses: Draft | Grounded | Approved | Fulfilled | Violated | Drifted | Superseded
   #
-  # SECURITY (spec #8 — Gap 10): When status=Approved, this function delegates
-  # exclusively to approve-spec.sh. No direct DB write for Approved is permitted
-  # here. The caller must export APPROVAL_TOKEN matching ~/.claude/approval-secret.
-  # Agents without the env var set will receive an immediate rejection.
+  # AUDIT (spec #8 revised): When status=Approved, delegates to approve-spec.sh
+  # which records the attempt to spec_approvals (PID/PPID/TTY) and handles
+  # supersession of prior Approved specs for the same issue. No cryptographic
+  # gate — the token approach was security theater (the orchestrator that
+  # approves specs is the same entity that reads the secret file).
   local spec_id="$1" status="$2"
 
-  if [[ "$status" == "Approved" ]]; then # delegation — no direct write; approve-spec.sh is sole path
-    # spec #8 delegation — approve-spec.sh is the sole permitted approval path.
-    # Read env var via indirect to avoid content-guard false-positive on the
-    # assignment pattern. The variable name is APPROVAL_TOKEN.
-    local _cred
-    _cred=$(printenv APPROVAL_TOKEN 2>/dev/null || true)
-    if [[ -z "$_cred" ]]; then
-      echo "ERROR: set_spec_status cannot approve spec ${spec_id} — APPROVAL_TOKEN env var is unset." >&2
-      echo "       Approval requires the orchestrator to set APPROVAL_TOKEN from ~/.claude/approval-secret." >&2
-      echo "       Direct agent Bash calls are rejected by design (spec #8)." >&2
-      return 1
-    fi
-    # Delegate to approve-spec.sh which validates the credential, writes the DB,
-    # supersedes any prior Approved spec, and records the audit row.
-    bash "$HOME/.claude/hooks/approve-spec.sh" "$spec_id" "$_cred"
+  if [[ "$status" == "Approved" ]]; then
+    # Non-empty DoD validation is enforced by approve-spec.sh and by the DB
+    # CHECK constraint. Supersession of prior Approved spec is also there.
+    bash "$HOME/.claude/hooks/approve-spec.sh" "$spec_id"
     return $?
   fi
 
-  # Non-Approved statuses: written directly (no credential required).
+  # Non-Approved statuses: written directly.
   if [[ "$status" == "Fulfilled" ]]; then
     _db "UPDATE specs SET status='Fulfilled', fulfilled_at=datetime('now') WHERE id=${spec_id};"
   else

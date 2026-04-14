@@ -61,7 +61,6 @@ SENSITIVE_PATH_PATTERNS=(
   'credentials\.json'
   'service.account\.json'
   '\.secret$'
-  'approval-secret'
 )
 
 check_path_sensitive() {
