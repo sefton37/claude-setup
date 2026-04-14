@@ -8,6 +8,16 @@
 # Implements Gate 0 of the verification chain: no code change proceeds
 # without an APPROVED spec whose DoD is machine-checkable.
 #
+# Key functions:
+#   create_spec          — insert Draft spec for the active issue
+#   set_spec_status      — transition spec status; enforces one-Approved-per-issue
+#   get_active_spec_id   — returns the Approved/Grounded spec for active issue
+#   run_all_dod_checks   — execute every DoD check and record results
+#
+# set_spec_status is the primary lifecycle gate: it validates DoD completeness
+# before Approved transitions and supersedes any prior Approved spec for the
+# same issue (enforcing the one-Approved-per-issue invariant).
+#
 # Usage: source ~/.claude/hooks/spec-ops.sh
 # ============================================================================
 
@@ -93,6 +103,7 @@ update_spec() {
 
 set_spec_status() {
   # Args: $1=spec_id  $2=status
+  # Valid statuses: Draft | Grounded | Approved | Fulfilled | Violated | Drifted | Superseded
   local spec_id="$1" status="$2"
   # Defense-in-depth: reject Approved if DoD is absent, null, invalid, or empty.
   # The DB CHECK constraint is the structural guard; this is the UX guard so the
@@ -116,6 +127,22 @@ set_spec_status() {
       echo "ERROR: cannot approve spec ${spec_id} — dod_json is an empty array. Add at least one DoD check first." >&2
       return 1
     fi
+
+    # Enforce one-Approved-per-issue: supersede any prior Approved spec for the
+    # same issue_id before setting this one to Approved. The partial unique index
+    # (idx_specs_one_approved_per_issue) makes duplicate Approved structurally
+    # impossible; this block is the explicit, logged supersession step so the
+    # transition is observable rather than a silent constraint violation.
+    local issue_id
+    issue_id=$(_db "SELECT issue_id FROM specs WHERE id=${spec_id};")
+    if [[ -n "$issue_id" && "$issue_id" != "NULL" ]]; then
+      local prior_id
+      prior_id=$(_db "SELECT id FROM specs WHERE issue_id=${issue_id} AND status='Approved' AND id != ${spec_id} LIMIT 1;")
+      if [[ -n "$prior_id" ]]; then
+        echo "INFO: superseding prior Approved spec #${prior_id} for issue #${issue_id} → Superseded (approving spec #${spec_id})" >&2
+        _db "UPDATE specs SET status='Superseded', updated_at=datetime('now') WHERE id=${prior_id};"
+      fi
+    fi
   fi
   local extra=""
   if [[ "$status" == "Approved" ]]; then
@@ -125,6 +152,18 @@ set_spec_status() {
   fi
   _db "UPDATE specs SET status='${status}'${extra} WHERE id=${spec_id};"
 }
+
+ensure_one_approved_per_issue_index() {
+  # Idempotent migration: creates the partial unique index that enforces at most
+  # one Approved spec per issue_id at the DB layer. Called at source time so any
+  # environment that sources spec-ops.sh picks up the constraint automatically.
+  sqlite3 "$DB_PATH" \
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_specs_one_approved_per_issue ON specs(issue_id) WHERE status='Approved';" \
+    2>/dev/null || true
+}
+
+# Run migration on every source — idempotent, fast (no-op if index already exists).
+ensure_one_approved_per_issue_index
 
 # ---- Grounding -------------------------------------------------------------
 
