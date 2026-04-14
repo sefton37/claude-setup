@@ -12,6 +12,8 @@
 # ============================================================================
 
 source "$HOME/.claude/hooks/db-ops.sh"
+# All _db() calls in this file go through db-ops.sh::_db(), which injects
+# PRAGMA foreign_keys=ON into every SQLite invocation. No separate override needed.
 
 SPEC_DOCS_BASE="$HOME/talking-rock/product/docs"
 

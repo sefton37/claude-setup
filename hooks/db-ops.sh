@@ -18,7 +18,9 @@ mkdir -p "$STATE_DIR"
 # ---- Helpers ---------------------------------------------------------------
 
 _db() {
-  echo ".timeout 5000" | cat - <(echo "$1") | sqlite3 "$DB_PATH"
+  # PRAGMA foreign_keys=ON is injected into every SQLite invocation so that FK
+  # violations raise errors rather than silently inserting orphaned rows.
+  printf '.timeout 5000\nPRAGMA foreign_keys=ON;\n%s\n' "$1" | sqlite3 "$DB_PATH"
 }
 
 get_project_name() {
@@ -246,6 +248,15 @@ record_commit() {
 
   local cycle_clause="NULL"
   [[ -n "$cycle_id" ]] && cycle_clause="$cycle_id"
+
+  # Guard: abort DB insert if issue_id is still unresolved (no active issue,
+  # no explicit ref in message). Belt-and-suspenders with the schema NOT NULL
+  # constraint and the pre-commit hook's issue-linkage check.
+  # The schema will also reject NULL inserts at the SQLite level (via NOT NULL).
+  if [[ -z "$issue_id" ]]; then
+    echo "WARNING: record_commit — no active issue and no 'fixes|closes|refs #N' in commit message. DB insert aborted." >&2
+    return 1
+  fi
 
   local issue_clause="NULL"
   [[ -n "$issue_id" ]] && issue_clause="$issue_id"
