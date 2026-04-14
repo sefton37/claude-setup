@@ -94,6 +94,29 @@ update_spec() {
 set_spec_status() {
   # Args: $1=spec_id  $2=status
   local spec_id="$1" status="$2"
+  # Defense-in-depth: reject Approved if DoD is absent, null, invalid, or empty.
+  # The DB CHECK constraint is the structural guard; this is the UX guard so the
+  # product-owner agent sees a clear error before hitting a DB constraint violation.
+  if [[ "$status" == "Approved" ]]; then
+    local dod
+    dod=$(get_spec_dod "$spec_id")
+    if [[ -z "$dod" || "$dod" == "null" ]]; then
+      echo "ERROR: cannot approve spec ${spec_id} — dod_json is absent or null. Add at least one DoD check first." >&2
+      return 1
+    fi
+    local valid_json
+    valid_json=$(sqlite3 "$DB_PATH" "SELECT json_valid('$(echo "$dod" | sed "s/'/''/g")');" 2>/dev/null || echo "0")
+    if [[ "$valid_json" != "1" ]]; then
+      echo "ERROR: cannot approve spec ${spec_id} — dod_json is not valid JSON. Fix the DoD JSON before approving." >&2
+      return 1
+    fi
+    local dod_count
+    dod_count=$(sqlite3 "$DB_PATH" "SELECT json_array_length('$(echo "$dod" | sed "s/'/''/g")');" 2>/dev/null || echo "0")
+    if [[ -z "$dod_count" || "$dod_count" -lt 1 ]]; then
+      echo "ERROR: cannot approve spec ${spec_id} — dod_json is an empty array. Add at least one DoD check first." >&2
+      return 1
+    fi
+  fi
   local extra=""
   if [[ "$status" == "Approved" ]]; then
     extra=", approved_at=datetime('now'), approved_by='user'"
@@ -265,7 +288,12 @@ run_all_dod_checks() {
   local spec_id="$1" phase="$2" run_n="${3:-1}"
   local dod
   dod=$(get_spec_dod "$spec_id")
-  [[ -z "$dod" || "$dod" == "null" ]] && return 0
+  # Vacuous-pass guard: if the DoD is absent or empty, return non-zero so callers
+  # know no checks were executed. An Approved spec with no DoD is a structural error.
+  if [[ -z "$dod" || "$dod" == "null" ]]; then
+    echo "WARNING: spec ${spec_id} has no dod_json — zero checks executed." >&2
+    return 1
+  fi
 
   local failures=0
   while IFS= read -r json_line; do

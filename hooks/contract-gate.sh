@@ -116,11 +116,45 @@ EOF
   exit 2
 fi
 
+# ---- Empty DoD guard on Approved spec (blocking) ---------------------------
+# If the active spec is Approved but has no DoD entries, the contract is in a
+# bad state (e.g., constraint was added after approval, or a direct DB write
+# bypassed the shell guard in set_spec_status). Block with a distinct message.
+dod=$(get_spec_dod "$spec_id")
+dod_ok=0
+if [[ -n "$dod" && "$dod" != "null" ]]; then
+  # Use SQLite json_array_length to validate: mirrors the DB CHECK constraint exactly.
+  # Returns empty/null if dod is not valid JSON; returns 0 if valid JSON but empty array.
+  dod_count=$(sqlite3 "$DB_PATH" "SELECT json_array_length(json('$(echo "$dod" | sed "s/'/''/g")'))" 2>/dev/null || echo "0")
+  if [[ "$dod_count" =~ ^[0-9]+$ ]] && [[ "$dod_count" -ge 1 ]]; then
+    dod_ok=1
+  fi
+fi
+if [[ "$dod_ok" -eq 0 ]]; then
+  cat >&2 <<EOF
+[contract-gate] BLOCKED — spec #${spec_id} is Approved but has an empty or invalid DoD.
+
+File:     $file_path
+Tool:     $tool
+
+The active spec (#${spec_id}) has status=Approved but its dod_json is absent,
+empty, or not valid JSON. This is a bad-state condition: mechanical verification
+cannot proceed without at least one DoD check.
+
+Fix options:
+  1. Add DoD checks:  source ~/.claude/hooks/spec-ops.sh && update_spec ${spec_id} dod_json '[...]'
+  2. Re-run set_spec_status to validate:  set_spec_status ${spec_id} Approved
+  3. If this spec is being replaced, create a new spec for the current request.
+
+This message differs from "no spec" — a spec exists but its DoD is empty.
+EOF
+  exit 2
+fi
+
 # ---- Continuous DoD checks (cheap subset, non-blocking) --------------------
 # Run the cheap check types now; record results; never block on failure here.
 # The auditor is the blocking gate at commit time.
-dod=$(get_spec_dod "$spec_id")
-if [[ -n "$dod" && "$dod" != "null" ]]; then
+if [[ "$dod_ok" -eq 1 ]]; then
   {
     while IFS= read -r json_line; do
       [[ -z "$json_line" ]] && continue
