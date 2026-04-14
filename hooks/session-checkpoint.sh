@@ -17,6 +17,25 @@
 set -euo pipefail
 
 PROJECT_DIR="${CLAUDE_PROJECT_DIR:-.}"
+
+# ---- Reset trivial-budget counter for this session --------------------------
+# This runs unconditionally before any early exits, so it fires even when
+# the project is not a git repo. Derive session-id the same way
+# trivial-classifier.sh does: prefer CLAUDE_SESSION_ID; fall back to hash.
+_sess_id="${CLAUDE_SESSION_ID:-}"
+if [[ -z "$_sess_id" ]]; then
+  _sess_id=$(echo "${CLAUDE_PROJECT_DIR:-unknown}-$(date +%Y%m%d%H)" | sha256sum | cut -c1-16)
+fi
+_budget_dir="$HOME/.claude/hooks/state/${_sess_id}"
+_budget_file="${_budget_dir}/trivial-budget.json"
+mkdir -p "$_budget_dir"
+python3 -c "
+import json
+obj = {'session_id': '$_sess_id', 'total_loc': 0, 'total_files': 0, 'edits_count': 0, 'files_seen': []}
+with open('$_budget_file', 'w') as f:
+    json.dump(obj, f)
+" 2>/dev/null || true
+
 cd "$PROJECT_DIR" 2>/dev/null || exit 0
 
 # ---- Check for git repo ----

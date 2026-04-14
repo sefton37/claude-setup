@@ -134,6 +134,28 @@ else
   echo "  spec is Approved (trivial edits bypass via trivial-classifier.sh)."
 fi
 
+# ---- Trivial budget status --------------------------------------------------
+_BUDGET_SID="${CLAUDE_SESSION_ID:-}"
+if [[ -z "$_BUDGET_SID" ]]; then
+  _BUDGET_SID=$(echo "${CLAUDE_PROJECT_DIR:-unknown}-$(date +%Y%m%d%H)" | sha256sum | cut -c1-16)
+fi
+_BUDGET_FILE="$HOME/.claude/hooks/state/${_BUDGET_SID}/trivial-budget.json"
+if [[ -f "$_BUDGET_FILE" ]]; then
+  _BUDGET_LINE=$(python3 -c "
+import json
+try:
+    d = json.load(open('$_BUDGET_FILE'))
+    loc = d.get('total_loc', 0)
+    files = d.get('total_files', 0)
+    edits = d.get('edits_count', 0)
+    print(f'TRIVIAL BUDGET: {loc}/30 LOC, {files}/3 files, {edits}/10 edits used this session')
+except Exception:
+    print('TRIVIAL BUDGET: 0/30 LOC, 0/3 files, 0/10 edits used this session')
+" 2>/dev/null || echo 'TRIVIAL BUDGET: (unreadable state)')
+  echo ""
+  echo "$_BUDGET_LINE"
+fi
+
 echo ""
 if [[ -n "$ALREADY_ACTIVE" ]]; then
   echo "ACTIVE SESSION ISSUES: #${ALREADY_ACTIVE// /, #} (resumed from prior session)"
